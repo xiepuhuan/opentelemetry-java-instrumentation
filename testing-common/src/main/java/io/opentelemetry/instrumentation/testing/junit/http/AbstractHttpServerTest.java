@@ -19,6 +19,7 @@ import static io.opentelemetry.sdk.testing.assertj.OpenTelemetryAssertions.equal
 import static org.junit.jupiter.api.Assumptions.assumeFalse;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
+import com.google.common.collect.ImmutableMap;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import io.opentelemetry.api.GlobalOpenTelemetry;
 import io.opentelemetry.api.common.AttributeKey;
@@ -72,6 +73,7 @@ import io.opentelemetry.testing.internal.io.netty.handler.codec.http.HttpVersion
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -91,6 +93,9 @@ import org.junit.jupiter.params.provider.ValueSource;
 public abstract class AbstractHttpServerTest<SERVER> extends AbstractHttpServerUsingTest<SERVER> {
   public static final String TEST_REQUEST_HEADER = "X-Test-Request";
   public static final String TEST_RESPONSE_HEADER = "X-Test-Response";
+  public static final Map<String, String> BAGGAGE_HEADERS = ImmutableMap.of(
+      "baggage-key-1", "baggage-value-1",
+      "baggage-key-2", "baggage-value-2");
 
   private final HttpServerTestOptions options = new HttpServerTestOptions();
 
@@ -533,15 +538,32 @@ public abstract class AbstractHttpServerTest<SERVER> extends AbstractHttpServerU
               trace.anySatisfy(
                   span ->
                       assertServerSpan(
-                              assertThat(span),
-                              HttpConstants._OTHER,
-                              SUCCESS,
-                              options.responseCodeOnNonStandardHttpMethod)
+                          assertThat(span),
+                          HttpConstants._OTHER,
+                          SUCCESS,
+                          options.responseCodeOnNonStandardHttpMethod)
                           .hasAttribute(HttpAttributes.HTTP_REQUEST_METHOD_ORIGINAL, method)));
     } finally {
       eventLoopGroup.shutdownGracefully().await(10, TimeUnit.SECONDS);
     }
   }
+
+  @Test
+  void captureBaggage() {
+    assumeTrue(options.testBaggage);
+    String method = "GET";
+    AggregatedHttpRequest request =
+        AggregatedHttpRequest.of(
+            request(SUCCESS, method).headers().toBuilder()
+                .set("baggage", "baggage-key-1=baggage-value-1", "baggage-key-2=baggage-value-2")
+//                .add("baggage", "baggage-key-2=baggage-value-2")
+                .build());
+    AggregatedHttpResponse response = client.execute(request).aggregate().join();
+
+    String spanId = assertResponseHasCustomizedHeaders(response, SUCCESS, null);
+    assertTheTraces(1, null, null, spanId, method, SUCCESS);
+  }
+
 
   private static Bootstrap buildBootstrap(EventLoopGroup eventLoopGroup) {
     Bootstrap bootstrap = new Bootstrap();
@@ -844,6 +866,10 @@ public abstract class AbstractHttpServerTest<SERVER> extends AbstractHttpServerU
             assertThat(attrs)
                 .containsEntry(
                     "servlet.request.parameter.test-parameter", new String[] {"test value õäöü"});
+          }
+
+          if (options.testBaggage) {
+            BAGGAGE_HEADERS.forEach((key, value) -> assertThat(attrs).containsEntry(key, value));
           }
         });
 
